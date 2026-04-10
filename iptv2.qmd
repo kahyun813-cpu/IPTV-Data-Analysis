@@ -1,0 +1,334 @@
+---
+title: "미다팀-IPTV 채널 시청률 데이터 동등성 검증 보고서2"
+author: "김가현"
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: cosmo
+    
+editor: visual
+---
+
+```{r}
+options(encoding = "UTF-8")
+Sys.setlocale("LC_CTYPE", "ko_KR.UTF-8")
+```
+
+## 1. 분석 개요 (Overview)
+
+본 보고서는 미다팀 데이터와 IPTV 데이터 간의 시청률 동등성을 검증하기 위한 최종 분석 결과를 기술합니다. 채널 번호 매핑 이슈를 해결하기 위해 채널명을 기준으로 1:1 매핑을 수행하였으며, 데이터 전처리, 시각화, 기초 통계 검정, 그리고 최종적으로 개별 채널 수준의 동등성 검정(Individual Equivalence Test)을 수행하여 대체 가능성을 판단합니다.
+
+```{r}
+if (!require("readxl")) install.packages("readxl")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("TOSTER")) install.packages("TOSTER")
+if (!require("tolerance")) install.packages("tolerance")
+if (!require("ggplot2")) install.packages("ggplot2")
+
+library(readxl)
+library(dplyr)
+library(TOSTER)
+library(tolerance)
+library(ggplot2)
+```
+
+## 2. 데이터 전처리 (Data Preprocessing)
+
+### 2.1 매핑 로직 및 데이터 로드
+
+채널 번호(ID) 기준 매핑 시 1:N 매핑 문제가 발생하여, **채널명**을 고유 식별자(Key)로 활용하여 1:1 매핑을 확정했습니다.
+
+-   **제외 대상:** IPTV 대응 데이터가 없는 채널(미다팀 원본 내 빨간색 표시), 시청 시간은 있으나 편성표 ID가 없는 채널, 검정 불가 ID 등은 분석에서 제외하였습니다.
+
+```{r}
+# 1. 데이터 로드
+file_path <- "C:/Users/kahyu/Desktop/odata.xlsx"
+
+df <- read_excel(file_path, sheet = "Sheet1")
+
+df_clean <- df %>%
+  select(Mida = 1, IPTV = 2) %>% 
+  mutate(Mida = as.numeric(Mida), IPTV = as.numeric(IPTV)) %>%
+  filter(!is.na(Mida) & !is.na(IPTV))
+
+# 2. Pairwise Difference 계산
+x <- df_clean$Mida - df_clean$IPTV
+cat("\n[Pairwise num] N =", length(x), "\n")
+```
+
+## 3. 데이터 시각화 (Visualization)
+
+데이터의 분포와 일치도를 시각적으로 확인합니다.
+
+### 3.1 Scatterplot (산점도)
+
+-   **목적:** $Y=X$ 대각선에 데이터가 밀집해 있는지 확인하여 직관적인 일치도 판단.
+
+```{r}
+# 1. 결정계수(R^2) 계산
+r_sq <- cor(df_clean$Mida, df_clean$IPTV)^2
+
+# 2. 산점도 시각화 (수정사항 반영: 정사각형 비율 및 R^2 추가)
+ggplot(df_clean, aes(x = Mida, y = IPTV)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  # 기준선 (Y=X)
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed", size = 1) +
+  # x, y축 범위와 비율을 동일하게 설정 (정사각형 만들기)
+  coord_fixed(ratio = 1) + 
+  labs(title = "MidaTeam vs IPTV Share Scatterplot",
+       subtitle = paste0("Coefficient of Determination (R²) = ", round(r_sq, 4)),
+       x = "MidaTeam Share (%)",
+       y = "IPTV Share (%)",
+       caption = "Red dashed line indicates Y = X (Perfect Match)") +
+  theme_minimal() +
+  theme(aspect.ratio = 1)
+```
+
+### 3.2 Histogram of Differences (차이 분포)
+
+-   **목적:** 차이($D$)가 0을 중심으로 대칭적으로 분포하는지 확인.
+
+```{r}
+df_clean$Diff <- x
+mean_val <- mean(x)
+median_val <- median(x)
+
+ggplot(df_clean, aes(x = Diff)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.05, fill = "gray80", color = "black") +
+  geom_density(alpha = 0.2, fill = "blue") +
+  geom_vline(aes(xintercept = mean_val, linetype = "Mean"), color = "black", size = 1) +
+  geom_vline(aes(xintercept = median_val, linetype = "Median"), color = "red", size = 1) +
+  scale_linetype_manual(name = "Statistics", 
+                        values = c("Mean" = "solid", "Median" = "dashed"),
+                        labels = c(paste0("Mean: ", round(mean_val, 4)), 
+                                   paste0("Median: ", round(median_val, 4)))) +
+  labs(title = "Distribution of Differences (Mida - IPTV)",
+       x = "Difference", y = "Density") +
+  theme_minimal()
+```
+
+## 4. 정규성 및 기초 통계 검정 (Statistical Tests)
+
+### 4.1 Shapiro-Wilk Normality Test (Raw Data)
+
+검정 내용: 원본 차이 데이터(\$D\$)가 정규분포를 따르는지 확인.
+
+가설: $H_0$: 정규분포를 따른다 vs $H_1$: 따르지 않는다.
+
+```{r}
+print(shapiro.test(x))
+```
+
+결과 해석: 정규성 가성을 만족하지 못한다. 표본 수가 커 Shapiro–Wilk 검정이 정규성의 미세한 편차에도 민감하게 반응했을 가능성이 있다.
+
+### 4.2 Log-Difference Normality Check
+
+검정 내용 및 절차: 데이터 분포의 정규성을 확인하기 위해 Shapiro-Wilk 검정을 수행합니다. 특히, 추후 진행할 TOST 분석의 가정 충족 여부를 확인하기 위해 원본 차이($D$)뿐만 아니라 로그 차이($\log(\text{Mida}) - \log(\text{IPTV})$)에 대해서도 검정을 진행했습니다.
+
+가설 설정:
+
+귀무가설 ($H_0$): 데이터는 정규분포를 따른다.
+
+대립가설 ($H_1$): 데이터는 정규분포를 따르지 않는다.
+
+```{r}
+x_log <- log(df_clean$Mida) - log(df_clean$IPTV)
+shapiro_log_result <- shapiro.test(x_log)
+print(shapiro_log_result)
+
+if (shapiro_log_result$p.value < 0.05) {
+  cat("해석: P-value < 0.05, H0 기각. 로그 차이 데이터는 정규성을 만족하지 않습니다.\n")
+} else {
+  cat("해석: P-value > 0.05, H0 채택. 로그 차이 데이터는 정규성을 만족합니다.\n")
+}
+```
+
+결과 해석: P-value \< 0.05 ($H_0$ 기각). 원본 데이터와 로그 변환 데이터 모두 정규성 가정을 만족하지 않습니다. 따라서, 이후 진행되는 동등성 분석에서는 로그 변환 없이 원본 데이터를 사용하였습니다.
+
+### 4.3 Paired t-test (대응표본 t-검정)
+
+검정 내용: 두 그룹의 평균 차이가 통계적으로 유의미한지 확인.
+
+가설: $H_0: \mu_{diff} = 0$ vs $H_1: \mu_{diff} \neq 0$
+
+```{r}
+print(t.test(df_clean$Mida, df_clean$IPTV, paired = TRUE))
+```
+
+검정 결과: P-value \> 0.05
+
+결과 해석: 대응표본 t-검정 결과, 평균 차이가 0이라는 귀무가설을 유의수준 0.05에서 기각할 수 없었다. 이는 평균 차이가 존재한다는 통계적 증거가 충분하지 않음을 의미하며, 평균의 동등성을 직접적으로 입증하는 결과는 아니다.
+
+### 4.4 Wilcoxon Signed Rank Test (윌콕슨 부호 순위 검정)
+
+검정 내용: 정규성이 충족되지 않을 경우를 대비한 비모수적 중앙값 차이 검정.
+
+가설: $H_0: Median_{diff} = 0$ vs $H_1: Median_{diff} \neq 0$
+
+```{r}
+print(wilcox.test(df_clean$Mida, df_clean$IPTV, paired = TRUE))
+```
+
+검정 결과: P-value \> 0.05
+
+결과 해석: Wilcoxon 부호순위 검정에서도 중앙값 차이가 0이라는 귀무가설을 기각하지 못하였다. 이는 분포 위치 차이가 존재한다는 증거가 부족함을 의미한다.
+
+표본 수가 충분히 크므로 평균 차이에 대한 추론은 중심극한정리에 의해 정규 근사를 사용할 수 있다. 그러나 개별 차이값의 분포는 비정규성을 보이므로, 개별 동등성 판단을 위해서는 정규성 가정에 의존하지 않는 방법을 병행하였다.
+
+## 5. 동등성 검정 (Equivalence Tests)
+
+### 5.1 실질적 유의성 확인 (Practical Significance Check)
+
+통계적인 동등성 판단에 앞서, 우리가 설정한 동등성 기준($\delta = 0.05$)이 실제 데이터 체급(Scale)에 비해 적절한지 확인합니다. 만약 대부분의 시청률 데이터 값이 0.05 이하의 매우 낮은 구간에 형성되어 있다면, 0.05의 오차는 수치상으로는 커 보일 수 있으나(데이터 대비 10배 등), 실무적으로는 모두 '무의미한 수준의 미세 값'으로 간주할 수 있기 때문입니다.
+
+```{r}
+# 패키지 로드 (없을 경우 설치)
+if (!require("gridExtra")) install.packages("gridExtra")
+library(gridExtra)
+
+# 1. Mida 및 IPTV 원본 데이터 히스토그램 (0.05 수치 기준선 추가)
+p1 <- ggplot(df_clean, aes(x = Mida)) +
+  geom_histogram(fill = "steelblue", color = "white", bins = 30) +
+  geom_vline(xintercept = 0.05, color = "red", linetype = "dashed", size = 1) +
+  labs(title = "미다팀 데이터 점유율 분포", 
+       x = "점유율", 
+       y = "빈도",
+       subtitle = "적색 점선: 0.05 기준선") +
+  theme_minimal()
+
+p2 <- ggplot(df_clean, aes(x = IPTV)) +
+  geom_histogram(fill = "darkorange", color = "white", bins = 30) +
+  geom_vline(xintercept = 0.05, color = "red", linetype = "dashed", size = 1) +
+  labs(title = "IPTV 데이터 점유율 분포", 
+       x = "점유율", 
+       y = "빈도",
+       subtitle = "적색 점선: 0.05 기준선") +
+  theme_minimal()
+
+# 두 그래프 나란히 배치
+grid.arrange(p1, p2, ncol = 2)
+```
+
+**해석:**
+
+히스토그램 확인 결과, 미다팀과 IPTV 시청률 모두에서 상당수 관측치가 0.05 이하의 매우 낮은 구간에 집중되어 있음을 확인하였다. 이는 시청률 값의 절대적 규모 자체가 매우 작음을 의미한다.
+
+따라서 동등성 한계로 설정한 δ = 0.05는 상대적인 비율 기준에서는 크게 보일 수 있으나, 실무적으로는 동일한 ‘미미한 시청 규모 구간’ 내 변동을 포괄하는 허용 오차로 해석될 수 있다.
+
+이러한 데이터 스케일 특성은 이후 동등성 검정 결과를 해석함에 있어 실질적 유의성(practical significance)을 함께 고려해야 할 필요성을 시사한다.
+
+### 5.2 TOST (Mean Equivalence)
+
+검정 내용 및 절차: 두 그룹의 평균 차이가 사전에 설정한 동등성 경계($-\delta, \delta$) 내에 존재하는지 확인하는 검정입니다. 두 개의 단측 검정(Two One-Sided Tests)을 동시에 수행하여 둘 다 유의할 경우 동등하다고 판단합니다.
+
+가설 설정:
+
+귀무가설 ($H_{0}$): 평균 차이가 설정된 범위 밖이다 ($\mu_{diff} \le -\delta$ 또는 $\mu_{diff} \ge \delta$).
+
+대립가설 ($H_{1}$): 평균 차이가 설정된 범위 안이다 ($-\delta < \mu_{diff} < \delta$, 동등함).
+
+```{r}
+delta_list <- c(0.01, 0.02, 0.0001, 0.05)
+for (d in delta_list) {
+  cat("\nDelta:", d, "\n")
+  print(t_TOST(x = x, low_eqbound = -d, high_eqbound = d, mu = 0, plot = FALSE))
+}
+```
+
+결과 해석: TOST 결과, 동등성 한계를 절대 점유율 차이 기준 $\delta = 0.05$로 설정한 경우 평균 차이에 대한 통계적 동등성이 유의하게 확인되었다. 반면, $\delta = 0.01$ 또는 $\delta = 0.02$와 같이 보다 엄격한 기준에서는 데이터의 변동성으로 인해 평균 동등성을 확증하지 못하였다.다만 5.1절에서 확인한 바와 같이, 미다팀 및 IPTV 시청 점유율 값 자체가 대부분 $0.05$ 이하의 매우 작은 구간에 집중되어 있다는 점을 고려하면, $\delta = 0.05$는 수치상으로는 커 보일 수 있으나 실무적으로는 동일한 ‘미미한 시청 규모 구간’ 내 변동을 포괄하는 허용 오차로 해석될 수 있다. 이러한 데이터 스케일 특성을 감안할 때, 평균 차이는 실질적으로 의미 있는 수준의 차이라고 보기는 어렵다.
+
+### 5.3 Individual Equivalence Test (Final)
+
+검정 내용 및 절차: Tolerance Interval(허용 구간) 방법을 사용하여, 전체 채널의 95%가 포함되는 실제 오차 범위를 계산합니다. 계산된 범위 $[L_{calc}, U_{calc}]$가 우리가 목표로 하는 허용 한계(Target Margin, $\pm 0.05$) 내에 들어오는지 검증합니다.
+
+가설 설정:
+
+1.  귀무가설 1 ($H_{10}$): $q_{1-p/2} \le L$ (상위 꼬리가 목표 하한보다 낮다) -\> 기각 시 $q_{1-p/2} > L$ 성공
+
+2.  귀무가설 2 ($H_{20}$): $q_{p/2} \ge U$ (하위 꼬리가 목표 상한보다 크다) -\> 기각 시 $q_{p/2} < U$ 성공
+
+```{r}
+# 목표 동등성 경계 설정 (Target Bounds)
+Target_L <- -0.5    
+Target_U <-  0.5    
+
+tol_result <- normtol.int(x = x, alpha = 0.05, P = 0.95, side = 2, method = "HE", log.norm = FALSE)
+Calc_L <- tol_result[1, "2-sided.lower"]
+Calc_U <- tol_result[1, "2-sided.upper"]
+
+cat(sprintf("Calculated 95%% Tolerance Interval: [%.5f, %.5f]\n", Calc_L, Calc_U))
+cat(sprintf("Target Equivalence Limit         : [%.5f, %.5f]\n", Target_L, Target_U))
+
+reject_H10 <- Calc_L >= Target_L
+reject_H20 <- Calc_U <= Target_U
+
+if (reject_H10 && reject_H20) {
+  cat("\nFinal Result: PASS (Individually Equivalent)\n")
+  cat("   계산된 구간이 목표 범위 내에 포함되므로, 두 데이터는 개별 채널 수준에서 동등합니다.\n")
+} else {
+  cat("\nFinal Result: FAIL (Not Equivalent)\n")
+  cat("   계산된 구간이 목표 범위를 벗어납니다.\n")
+}
+```
+
+결과 해석: Tolerance Interval 방법을 적용한 결과, (1−α)=0.95 신뢰수준에서 전체 채널의 95%를 포함하는절대 점유율 차이 허용 구간은 $[-0.403,\;0.422]$로 계산되었다.이는 사전에 설정한 목표 동등성 경계 $[-0.5,\;0.5]$ 내에완전히 포함된다.따라서 허용 오차 기준 $\pm 0.5$ 하에서,미다팀 데이터와 IPTV 데이터는 개별 채널 수준에서도통계적으로 동등하다고 판단할 수 있다.
+
+```{r}
+# 1. 차이 데이터 준비
+diff_data <- df_clean$Mida - df_clean$IPTV
+
+# 2. 기본 히스토그램 (정사각형 설정 없이 기본값 사용)
+ggplot(data.frame(x = diff_data), aes(x = x)) +
+  geom_histogram(fill = "gray80", color = "black", bins = 40) +
+  # 0.4 기준선 (빨간 점선)
+  geom_vline(xintercept = c(-0.4, 0.4), color = "red", linetype = "dashed", size = 1) +
+  # 0.5 기준선 (파란 실선)
+  geom_vline(xintercept = c(-0.5, 0.5), color = "blue", size = 1) +
+  labs(title = "Distribution of Differences with 0.4 and 0.5 Boundaries",
+       subtitle = "Red Dashed: 0.4 / Blue Solid: 0.5",
+       x = "Difference (Mida - IPTV)",
+       y = "Count") +
+  theme_minimal()
+```
+
+차이값 분포를 확인한 결과, 대부분의 관측치는 ±0.4 이내에 위치하며, 목표 동등성 한계인 ±0.5를 초과하는 값은 극히 일부에 불과하였다. 이는 개별 차이값이 0 근처에만 과도하게 몰려 있지 않으면서도, 설정한 허용 한계 내에서 안정적으로 분포하고 있음을 시각적으로 보여준다.
+
+```{r}
+# 1. 테스트할 파라미터 조합 설정
+alphas <- c(0.05, 0.1)     # 95% 신뢰수준, 90% 신뢰수준
+ps <- c(0.95, 0.90, 0.85)  # 포함 범위 95%, 90%, 85%
+target <- 0.5              # 목표 허용 한계
+
+# 2. 결과 저장용 데이터프레임
+sensitivity_table <- data.frame()
+
+# 3. 반복문을 통한 계산 과정 (교수님 요청사항 포함)
+for (a in alphas) {
+  for (p in ps) {
+    # Tolerance Interval 계산
+    out <- normtol.int(x = diff_data, alpha = a, P = p, side = 2, method = "HE")
+    
+    L_calc <- out[1, "2-sided.lower"] # Lower Bound
+    U_calc <- out[1, "2-sided.upper"] # Upper Bound
+    
+    # 결과 행 추가
+    sensitivity_table <- rbind(sensitivity_table, data.frame(
+      Confidence_Level = 1 - a,
+      Coverage_P = p,
+      Lower_Bound = round(L_calc, 4),
+      Upper_Bound = round(U_calc, 4),
+      Status = ifelse(L_calc >= -target && U_calc <= target, "PASS", "FAIL")
+    ))
+  }
+}
+
+# 4. 결과 출력
+print(sensitivity_table)
+```
+
+-   **Lower Bound (**$L_{calc}$): 하위 $(1-P)/2$ 분위수에 대한 신뢰구간의 하한값 (Lower Confidence Bound for the $(1-P)/2$ Quantile)
+
+-   **Upper Bound (**$U_{calc}$): 상위 $(1-P)/2$ 분위수에 대한 신뢰구간의 상한값 (Upper Confidence Bound for the $1-(1-P)/2$ Quantile)
+
+**최종 결론:** 민감도 분석을 통해 신뢰수준을 90%로 낮추거나 포함 비율을 85%까지 완화한 경우에도, 모든 조건에서 계산된 허용 구간이 목표 한계 ±0.5 내에 안정적으로 포함됨을 확인하였다. 이는 개별 동등성에 대한 판단이 분석 조건 변화에 대해 강건함을 시사한다.
