@@ -1,7 +1,7 @@
 # IPTV vs 미다팀 채널 시청점유율 동등성 검증
 
 **Author:** 김가현 (Korea University, Dept. of Statistics)  
-**Report:** [iptv2.html](./iptv2.html)
+**Report:** [iptv2.html](./iptv2.html) https://rpubs.com/khyitty/1382402 
 
 # IPTV Viewing-Share Equivalence Analysis
 
