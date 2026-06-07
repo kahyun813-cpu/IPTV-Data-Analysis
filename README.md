@@ -3,6 +3,15 @@
 **Author:** 김가현 (Korea University, Dept. of Statistics)  
 **Report:** [iptv2.html](./iptv2.html)
 
+# IPTV Viewing-Share Equivalence Analysis
+
+Statistical equivalence analysis assessing whether Mida Team's 
+viewing-share dataset can independently substitute for IPTV-based 
+measurement across 254 matched channels.
+
+Methods: Wilcoxon signed-rank test, TOST, Tolerance Interval (Howe's method)  
+Tools: R, Quarto
+
 ## 분석 개요
 
 KT IPTV에서 자체 산출한 채널 시청점유율 데이터와 미다팀 데이터 간의
